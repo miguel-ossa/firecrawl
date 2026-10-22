@@ -885,6 +885,163 @@ The build skills (integrating Firecrawl into product code) are authored in this 
 
 ---
 
+## Biblioteca personal con Firecrawl + Ollama
+
+Manual de instalación y uso de `biblioteca.py`: extracción de contenido de blogs y webs dirigida por instrucción en lenguaje natural, 100% local y sin coste.
+
+### Qué hace este sistema
+
+Construye una biblioteca personal de artículos extraídos de blogs y webs. Tres piezas, todas en local:
+
+- **Firecrawl (self-host):** descarga páginas web y las convierte a markdown limpio.
+- **Ollama con `qwen2.5:7b-instruct`:** interpreta en qué consiste cada página y localiza los elementos que coinciden con lo pedido.
+- **`biblioteca.py`:** coordina ambos, decide nombre de archivo y carpeta de cada elemento, y guarda el resultado en disco.
+
+Las tres deben estar activas a la vez. Lo más cómodo: tres ventanas de terminal (Docker/Firecrawl, Ollama si no se usa como app, y `biblioteca.py`).
+
+### Requisitos previos
+
+- Docker Desktop instalado y funcionando.
+- Ollama instalado, con `qwen2.5:7b-instruct` descargado.
+- Python 3 con pip.
+- Copia local del repositorio (fork propio): `miguel-ossa/firecrawl`.
+
+### Instalación de Firecrawl (self-host)
+
+**1. Clonar el repositorio**
+
+```bash
+git clone https://github.com/miguel-ossa/firecrawl.git
+cd firecrawl
+```
+
+**2. Crear el archivo `.env`** en la raíz con este contenido mínimo:
+
+```
+PORT=3002
+HOST=0.0.0.0
+USE_DB_AUTHENTICATION=false
+# Cambiar por una clave propia, no dejar "CHANGEME"
+BULL_AUTH_KEY=pon-aqui-algo-que-no-sea-CHANGEME
+```
+
+> No hace falta configurar nada más (proxies, Supabase, OpenAI...) para este uso.
+
+**3. Construir y levantar los contenedores** (en su propia terminal, que debe quedar abierta mientras se use el sistema):
+
+```bash
+docker compose build
+docker compose up
+```
+
+La primera vez tarda varios minutos. Después Firecrawl queda en `http://localhost:3002`.
+
+**4. Parar los contenedores:** `Ctrl+C` en la ventana de `docker compose up`. Detiene API, workers, Redis, Postgres y Playwright sin eliminar contenedores ni volúmenes. Para retomar basta `docker compose up` (sin repetir `build`, salvo que cambie el repositorio).
+
+> `docker compose down` elimina también los contenedores; con `-v` borra además los volúmenes de datos (reinicia el estado de Postgres). Para este uso, `Ctrl+C` es suficiente.
+
+**5. Comprobar que funciona** desde otra terminal:
+
+```bash
+curl -X POST http://localhost:3002/v1/scrape \
+  -H 'Content-Type: application/json' \
+  -d '{"url": "https://firecrawl.dev"}'
+```
+
+Si devuelve markdown, Firecrawl está listo.
+
+### Arranque de Ollama
+
+Si se instaló como app de Mac, normalmente ya corre en segundo plano. Comprobación:
+
+```bash
+curl http://localhost:11434
+```
+
+Si responde `Ollama is running`, no hace falta nada más. Si da error de conexión:
+
+```bash
+ollama serve
+```
+
+El modelo `qwen2.5:7b-instruct` es ligero (unos 6-8 GB de RAM) y tiene buen instruction-following y salida JSON estructurada, que es lo que necesita el script. Si no está descargado:
+
+```bash
+ollama pull qwen2.5:7b-instruct
+```
+
+### Instalación de `biblioteca.py`
+
+Entorno virtual (recomendado; hay que reactivarlo en cada terminal nueva):
+
+```bash
+cd /ruta/donde/esta/biblioteca.py
+python3 -m venv venv
+source venv/bin/activate
+```
+
+Dependencias:
+
+```bash
+python3 -m pip install firecrawl requests
+```
+
+### Ejecución diaria
+
+1. **Ventana 1 — Docker:** `docker compose up` dentro de la carpeta `firecrawl` (si no sigue corriendo).
+2. **Ventana 2 — Ollama:** `ollama serve`, solo si no está activo como app.
+3. **Ventana 3 — `biblioteca.py`:** activar el entorno virtual y lanzar el script.
+
+### Parámetros del script
+
+| Parámetro | Qué hace |
+|---|---|
+| `--url` | URL de partida: una página concreta o el dominio del blog. |
+| `--instruccion` | Qué buscar, en lenguaje natural (p. ej. "descarga los artículos sobre normativa"). |
+| `--carpeta` | Carpeta donde se guardan los resultados. |
+| `--crawl` | Recorre las primeras N páginas del sitio tal cual las encuentra (incluye irrelevantes, como el aviso legal). |
+| `--buscar` | Modo recomendado: Ollama clasifica los enlaces de la página de entrada, decide qué es artículo y qué sección merece explorarse (dos niveles), y solo descarga lo relevante. |
+| `--limite` | En `--crawl`: páginas a visitar. En `--buscar`: artículos a descargar. |
+| `--min-lineas` | Descarta elementos con menos líneas no vacías que este valor (filtra anuncios, fichas sueltas, etc.). Por defecto 15; con 0 no filtra. |
+
+### Modos de funcionamiento
+
+- **Página suelta** (sin `--crawl` ni `--buscar`): descarga y analiza una única URL.
+- **`--crawl`:** visita hasta `--limite` páginas, sean del tipo que sean. Útil si se conoce bien el sitio y se quiere revisar todo.
+- **`--buscar`:** modo dirigido por instrucción, en dos niveles:
+  1. Firecrawl descarga la página de entrada y extrae sus enlaces del mismo dominio (sin duplicados, imágenes ni PDFs).
+  2. Ollama recibe los enlaces con la instrucción y decide cuáles van directos a un artículo y cuáles son secciones con más contenido (p. ej. `/blog/`, `/guias/`, `/normativa/`).
+  3. El script entra en esas secciones y repite la clasificación, encontrando artículos no enlazados desde la portada.
+  4. Descarga los artículos elegidos, hasta `--limite`, con el mismo proceso de siempre (identificación del tipo de página, `--min-lineas`, etc.).
+
+> Por ahora `--buscar` no sigue paginación tipo `/blog/page/2/`; solo las secciones que cada página enlaza directamente.
+
+### Ejemplo real
+
+```bash
+python3 biblioteca.py --url "https://movilidad-urbana.es" --buscar --limite 10 \
+  --instruccion "descarga el contenido de las entradas del blog" \
+  --carpeta "biblioteca/movilidad-urbana" --min-lineas 20
+```
+
+- **Búsqueda:** Firecrawl leyó la portada y varias secciones candidatas (patinetes eléctricos, bicis eléctricas, normativa, guías...) y Ollama identificó 10 páginas candidatas.
+- **Descarga:** seis eran artículos de blog de un solo tema (normativa, seguros, menores de edad...) y se guardaron completos. Dos eran catálogos (patinetes y bicis eléctricas) y cada modelo se guardó como archivo individual (34 y 10 elementos).
+- **Resultado:** 50 elementos nuevos en `biblioteca/movilidad-urbana`, con su `index.md` actualizado.
+
+**Caso a vigilar (ya corregido):** cuando una página es un único artículo con subtítulos, el modelo podía tratar cada subtítulo como un elemento independiente. Dos correcciones:
+
+1. El prompt indica que los apartados de un mismo artículo no son elementos distintos; si la página es un único artículo con subtítulos, debe devolver un solo elemento.
+2. Red de seguridad sin depender del modelo: si la mitad o más de los elementos quedan por debajo de `--min-lineas`, el script asume que son apartados de un único artículo, descarta la fragmentación y guarda la página entera con su título real, avisando: "Los elementos eran apartados de un único artículo; se guarda la página entera."
+
+En páginas de varios artículos o productos independientes (catálogos) cada elemento supera `--min-lineas` de forma natural y la red de seguridad no se activa.
+
+### Mantenimiento y notas conocidas
+
+- Tras una ejecución conviene revisar los archivos guardados: si algún artículo se fragmentó mal, el trozo erróneo puede borrarse a mano y relanzarse el comando sobre esa URL.
+- Relanzar el mismo comando no duplica contenido: mismo nombre y mismo contenido se omite; mismo nombre y contenido distinto se guarda con sufijo numerado (`-2`, `-3`...).
+- Muchos avisos "No se localizó el inicio de..." suelen deberse a títulos con formato (emojis, negrita, numeración); el script lo tolera con normalización y coincidencia parcial.
+- Si Ollama tarda demasiado o el Mac va lento, el modelo exige más memoria de la disponible: cierra aplicaciones pesadas o usa un modelo aún más ligero.
+
 ## Open Source vs Cloud
 
 Firecrawl is open source under the AGPL-3.0 license. The cloud version at [firecrawl.dev](https://firecrawl.dev) includes additional features:
